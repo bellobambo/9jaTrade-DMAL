@@ -1,0 +1,58 @@
+module Types where
+
+-- | System roles in 9jaTrade with numeric markers:
+-- 1 = SupplierRole, 2 = BuyerRole, 3 = FinancierRole
+data CompanyRole
+  = SupplierRole
+  | BuyerRole
+  | FinancierRole
+  deriving (Eq, Show)
+
+-- | Convert CompanyRole to numeric marker (1 = Supplier, 2 = Buyer, 3 = Financier)
+roleToCode : CompanyRole -> Int
+roleToCode SupplierRole = 1
+roleToCode BuyerRole = 2
+roleToCode FinancierRole = 3
+
+-- | Convert numeric marker to CompanyRole
+codeToRole : Int -> Optional CompanyRole
+codeToRole 1 = Some SupplierRole
+codeToRole 2 = Some BuyerRole
+codeToRole 3 = Some FinancierRole
+codeToRole _ = None
+
+-- | Status of an Invoice across its lifecycle
+data InvoiceStatus
+  = InvoiceDraft
+  | InvoiceSubmitted
+  | InvoiceConfirmed
+  | InvoiceDelivered
+  | InvoiceFinanced
+  | InvoiceSettled
+  | InvoiceRejected
+  | InvoiceDisputed
+  deriving (Eq, Show)
+
+-- | Itemized commercial line item in an invoice
+data InvoiceItem = InvoiceItem with
+    description : Text     -- Item name / specifications
+    quantity : Decimal     -- Number of items
+    unit : Text            -- Unit of measure (e.g. "Units", "Metric Tons", "Cartons")
+    unitPrice : Decimal    -- Price per unit
+    itemTotal : Decimal    -- Total amount for this item (quantity * unitPrice)
+  deriving (Eq, Show)
+
+-- | Off-ledger document evidence stored with cryptographic hash
+data DocumentEvidence = DocumentEvidence with
+    docType : Text        -- e.g. "PurchaseOrder", "InvoicePDF", "DeliveryNote", "Waybill"
+    documentHash : Text   -- SHA-256 hash of the off-ledger document
+    uriOrRef : Text       -- Cloud storage reference or identifier
+  deriving (Eq, Show)
+
+-- | Dispute category
+data DisputeType
+  = AmountMismatch
+  | DeliveryIncomplete
+  | QualityIssue
+  | OtherDispute Text
+  deriving (Eq, Show)

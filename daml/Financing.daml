@@ -1,0 +1,214 @@
+module Financing where
+
+import Invoice
+
+-- | 1. Financing Request: Supplier requests working capital against an eligible invoice
+template FinancingRequest
+  with
+    requestId : Text
+    invoiceId : Text
+    invoiceCid : ContractId Invoice
+    supplier : Party
+    buyer : Party
+    operator : Party
+    eligibleFinanciers : [Party]
+    invoiceAmount : Decimal
+    maxFundingRequested : Decimal
+    currency : Text
+    dueDate : Time
+  where
+    signatory supplier
+    observer [operator] ++ eligibleFinanciers
+
+    ensure maxFundingRequested > 0.0 && maxFundingRequested <= invoiceAmount
+
+    -- | Any eligible registered Financier can submit a competitive offer
+    nonconsuming choice MakeFinancingOffer : ContractId FinancingOffer
+      with
+        offerId : Text
+        financier : Party
+        fundingAmount : Decimal
+        financingFee : Decimal
+        termDays : Int
+        offerExpiry : Time
+        conditions : Text
+      controller financier
+      do
+        assertMsg "Funding amount cannot exceed max requested" (fundingAmount <= maxFundingRequested)
+        assertMsg "Funding amount + fee cannot exceed total invoice amount" (fundingAmount + financingFee <= invoiceAmount)
+        create FinancingOffer with
+          offerId
+          requestId
+          invoiceId
+          invoiceCid
+          financier
+          supplier
+          buyer
+          operator
+          invoiceAmount
+          fundingAmount
+          financingFee
+          totalRepayment = fundingAmount + financingFee
+          termDays
+          offerExpiry
+          conditions
+
+    -- | Supplier can cancel request if not yet financed
+    choice CancelFinancingRequest : ()
+      controller supplier
+      do
+        return ()
+
+
+-- | 2. Financing Offer: Submitted by a financier with specific economic terms
+template FinancingOffer
+  with
+    offerId : Text
+    requestId : Text
+    invoiceId : Text
+    invoiceCid : ContractId Invoice
+    financier : Party
+    supplier : Party
+    buyer : Party
+    operator : Party
+    invoiceAmount : Decimal
+    fundingAmount : Decimal
+    financingFee : Decimal
+    totalRepayment : Decimal
+    termDays : Int
+    offerExpiry : Time
+    conditions : Text
+  where
+    signatory financier
+    observer supplier, operator
+
+    -- | Supplier accepts this offer.
+    -- Locks the invoice as FINANCED, which mathematically blocks any duplicate financing!
+    choice AcceptFinancingOffer : (ContractId FinancingAgreement, ContractId Invoice)
+      with
+        agreementId : Text
+      controller supplier
+      do
+        now <- getTime
+        assertMsg "Financing offer has expired" (now <= offerExpiry)
+
+        -- Transition underlying Invoice to Financed status (Consumes invoiceCid)
+        financedInvoiceCid <- exercise invoiceCid LockAsFinanced
+
+        -- Create binding Financing Agreement with exact settlement allocation
+        agreementCid <- create FinancingAgreement with
+          agreementId
+          invoiceId
+          supplier
+          buyer
+          financier
+          operator
+          invoiceAmount
+          fundingAmount
+          financingFee
+          totalRepaymentToFinancier = totalRepayment
+          supplierBalanceDue = invoiceAmount - totalRepayment
+          currency = "NGN"
+          dueDate = offerExpiry
+          isFunded = False
+          isSettled = False
+
+        return (agreementCid, financedInvoiceCid)
+
+    -- | Supplier declines this offer
+    choice RejectFinancingOffer : ()
+      controller supplier
+      do
+        return ()
+
+    -- | Offer expired cleanup
+    choice ExpireOffer : ()
+      controller financier
+      do
+        now <- getTime
+        assertMsg "Offer expiry time has not arrived yet" (now > offerExpiry)
+        return ()
+
+
+-- | 3. Financing Agreement: Binding terms between Supplier and Financier
+template FinancingAgreement
+  with
+    agreementId : Text
+    invoiceId : Text
+    supplier : Party
+    buyer : Party
+    financier : Party
+    operator : Party
+    invoiceAmount : Decimal
+    fundingAmount : Decimal
+    financingFee : Decimal
+    totalRepaymentToFinancier : Decimal
+    supplierBalanceDue : Decimal
+    currency : Text
+    dueDate : Time
+    isFunded : Bool
+    isSettled : Bool
+  where
+    signatory supplier, financier
+    observer buyer, operator
+
+    -- | Financier disburses working capital advance to supplier
+    choice MarkAsFunded : ContractId FinancingAgreement
+      controller financier
+      do
+        assertMsg "Agreement is already marked as funded" (not isFunded)
+        create this with isFunded = True
+
+    -- | Buyer settles invoice obligation at maturity.
+    -- Automatically computes settlement breakdown between Financier and Supplier.
+    choice SettleFinancing : (ContractId SettlementRecord, ContractId FinancingAgreement)
+      with
+        settlementAmount : Decimal
+        paymentReference : Text
+      controller buyer
+      do
+        assertMsg "Must be funded to settle" isFunded
+        assertMsg "Already settled" (not isSettled)
+        assertMsg "Settlement amount must equal total invoice amount" (settlementAmount == invoiceAmount)
+
+        now <- getTime
+        let
+          financierShare = totalRepaymentToFinancier
+          supplierRemainder = settlementAmount - totalRepaymentToFinancier
+
+        settlementCid <- create SettlementRecord with
+          agreementId
+          invoiceId
+          supplier
+          buyer
+          financier
+          operator
+          totalSettledAmount = settlementAmount
+          financierPayout = financierShare
+          supplierRemainderPayout = supplierRemainder
+          currency
+          settledAt = now
+          paymentReference
+
+        updatedAgreementCid <- create this with isSettled = True
+        return (settlementCid, updatedAgreementCid)
+
+
+-- | 4. Settlement Record: Verifiable on-chain breakdown of final disbursements
+template SettlementRecord
+  with
+    agreementId : Text
+    invoiceId : Text
+    supplier : Party
+    buyer : Party
+    financier : Party
+    operator : Party
+    totalSettledAmount : Decimal
+    financierPayout : Decimal
+    supplierRemainderPayout : Decimal
+    currency : Text
+    settledAt : Time
+    paymentReference : Text
+  where
+    signatory buyer, financier, supplier
+    observer operator

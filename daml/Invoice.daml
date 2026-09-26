@@ -1,0 +1,205 @@
+module Invoice where
+
+import Types
+
+-- | 1. The Core Commercial Invoice Contract
+template Invoice
+  with
+    invoiceId : Text
+    supplier : Party
+    buyer : Party
+    operator : Party
+    amount : Decimal
+    currency : Text
+    issueDate : Time
+    dueDate : Time
+    description : Text
+    items : [InvoiceItem]
+    supportingDocuments : [DocumentEvidence]
+    status : InvoiceStatus
+    correctionNotes : Optional Text
+  where
+    signatory supplier
+    observer buyer, operator
+
+    ensure amount > 0.0
+
+    -- | Supplier submits invoice for buyer confirmation
+    choice SubmitForReview : ContractId Invoice
+      controller supplier
+      do
+        assertMsg "Invoice must be in Draft state to submit" (status == InvoiceDraft)
+        create this with status = InvoiceSubmitted
+
+    -- | Supplier adds additional supporting document hashes (PO, Delivery Note, etc.)
+    choice AttachDocument : ContractId Invoice
+      with
+        newDoc : DocumentEvidence
+      controller supplier
+      do
+        assertMsg "Cannot modify documents once financed or settled" (status /= InvoiceFinanced && status /= InvoiceSettled)
+        create this with supportingDocuments = newDoc :: supportingDocuments
+
+    -- | Buyer acknowledges the obligation: "We acknowledge the debt"
+    choice ConfirmInvoice : (ContractId Invoice, ContractId BuyerConfirmation)
+      with
+        confirmationNotes : Text
+      controller buyer
+      do
+        assertMsg "Invoice must be submitted to confirm" (status == InvoiceSubmitted)
+        now <- getTime
+        buyerConfCid <- create BuyerConfirmation with
+          invoiceId
+          supplier
+          buyer
+          operator
+          amount
+          currency
+          dueDate
+          confirmedAt = now
+          confirmationNotes
+
+        updatedInvoiceCid <- create this with
+          status = InvoiceConfirmed
+          correctionNotes = None
+
+        return (updatedInvoiceCid, buyerConfCid)
+
+    -- | Buyer requests invoice correction before confirmation
+    choice RequestCorrection : ContractId Invoice
+      with
+        reason : Text
+      controller buyer
+      do
+        assertMsg "Can only request correction on submitted invoice" (status == InvoiceSubmitted)
+        create this with
+          status = InvoiceDraft
+          correctionNotes = Some reason
+
+    -- | Buyer rejects an incorrect or unrecognized invoice
+    choice RejectInvoice : ContractId Invoice
+      with
+        rejectionReason : Text
+      controller buyer
+      do
+        assertMsg "Can only reject submitted invoice" (status == InvoiceSubmitted)
+        create this with
+          status = InvoiceRejected
+          correctionNotes = Some ("Rejected: " <> rejectionReason)
+
+    -- | Buyer confirms goods/services fulfillment evidence
+    choice ConfirmDelivery : (ContractId Invoice, ContractId DeliveryConfirmation)
+      with
+        fulfillmentNotes : Text
+        deliveryEvidence : DocumentEvidence
+      controller buyer
+      do
+        assertMsg "Invoice must be confirmed before delivery confirmation" (status == InvoiceConfirmed)
+        now <- getTime
+        delivCid <- create DeliveryConfirmation with
+          invoiceId
+          supplier
+          buyer
+          operator
+          deliveredAt = now
+          fulfillmentNotes
+          evidence = deliveryEvidence
+
+        updatedInvoiceCid <- create this with
+          status = InvoiceDelivered
+          supportingDocuments = deliveryEvidence :: supportingDocuments
+
+        return (updatedInvoiceCid, delivCid)
+
+    -- | Transition state to Financed: Blocks any duplicate financing requests on the ledger!
+    choice LockAsFinanced : ContractId Invoice
+      controller supplier
+      do
+        assertMsg "Invoice must be Confirmed or Delivered to be financed" (status == InvoiceConfirmed || status == InvoiceDelivered)
+        create this with status = InvoiceFinanced
+
+    -- | Raise a dispute
+    choice RaiseDispute : (ContractId Invoice, ContractId InvoiceDispute)
+      with
+        initiator : Party
+        disputeType : DisputeType
+        evidenceNotes : Text
+      controller initiator
+      do
+        assertMsg "Initiator must be buyer or supplier" (initiator == buyer || initiator == supplier)
+        assertMsg "Cannot dispute closed invoice" (status /= InvoiceSettled)
+        disputeCid <- create InvoiceDispute with
+          invoiceId
+          initiator
+          counterparty = if initiator == buyer then supplier else buyer
+          operator
+          disputeType
+          evidenceNotes
+          resolved = False
+
+        updatedInvoiceCid <- create this with status = InvoiceDisputed
+        return (updatedInvoiceCid, disputeCid)
+
+    -- | Finalize invoice upon settlement
+    choice CloseInvoiceAsSettled : ContractId Invoice
+      controller buyer
+      do
+        assertMsg "Can only settle a financed or delivered invoice" (status == InvoiceFinanced || status == InvoiceDelivered)
+        create this with status = InvoiceSettled
+
+
+-- | 2. Buyer Formal Obligation Acknowledgement
+template BuyerConfirmation
+  with
+    invoiceId : Text
+    supplier : Party
+    buyer : Party
+    operator : Party
+    amount : Decimal
+    currency : Text
+    dueDate : Time
+    confirmedAt : Time
+    confirmationNotes : Text
+  where
+    signatory buyer
+    observer supplier, operator
+
+
+-- | 3. Fulfillment / Delivery Confirmation
+template DeliveryConfirmation
+  with
+    invoiceId : Text
+    supplier : Party
+    buyer : Party
+    operator : Party
+    deliveredAt : Time
+    fulfillmentNotes : Text
+    evidence : DocumentEvidence
+  where
+    signatory buyer
+    observer supplier, operator
+
+
+-- | 4. Invoice Dispute Record
+template InvoiceDispute
+  with
+    invoiceId : Text
+    initiator : Party
+    counterparty : Party
+    operator : Party
+    disputeType : DisputeType
+    evidenceNotes : Text
+    resolved : Bool
+  where
+    signatory initiator
+    observer counterparty, operator
+
+    -- | 9jaTrade Operator mediates and resolves dispute
+    choice ResolveDispute : ContractId InvoiceDispute
+      with
+        resolutionRuling : Text
+      controller operator
+      do
+        create this with
+          resolved = True
+          evidenceNotes = evidenceNotes <> " | Resolved by Operator: " <> resolutionRuling

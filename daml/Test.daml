@@ -1,0 +1,208 @@
+module Test where
+
+import Daml.Script
+import Types
+import Registration
+import Invoice
+import Financing
+import DA.Time
+import DA.Date
+
+-- | End-to-End Demo Story from 9jaTrade Specification (Section 2 & 12)
+-- Bello Electronics (Supplier) supplies ₦10,000,000 equipment to ABC Retail Ltd (Buyer).
+-- Financiers A, B, and C compete; Bello accepts Financier A; settlement is executed at maturity.
+test9jaTradeEndToEnd : Script ()
+test9jaTradeEndToEnd = script do
+  -- -------------------------------------------------------------
+  -- 1. Organizations & Role Registration
+  -- -------------------------------------------------------------
+  operator <- allocateParty "9jaTradeOperator"
+  bello <- allocateParty "BelloElectronics_Supplier"
+  abcRetail <- allocateParty "ABCRetailLtd_Buyer"
+  financierA <- allocateParty "FirstCapital_FinancierA"
+  financierB <- allocateParty "ApexLending_FinancierB"
+  financierC <- allocateParty "NaijaCredit_FinancierC"
+
+  -- Bello Electronics registers as Supplier
+  belloReqCid <- submit bello do
+    createCmd RegistrationRequest with
+      operator
+      applicantParty = bello
+      companyName = "Bello Electronics Nig Ltd"
+      businessLocation = "Alaba International Market, Ojo, Lagos"
+      cacOrRegistrationNumber = "RC-1049281"
+      requestedRole = SupplierRole
+      roleCode = 1
+
+  belloProfileCid <- submit operator do
+    exerciseCmd belloReqCid ApproveRegistration
+
+  -- ABC Retail registers as Buyer
+  abcReqCid <- submit abcRetail do
+    createCmd RegistrationRequest with
+      operator
+      applicantParty = abcRetail
+      companyName = "ABC Retail Superstores Ltd"
+      businessLocation = "Victoria Island, Lagos"
+      cacOrRegistrationNumber = "RC-5529103"
+      requestedRole = BuyerRole
+      roleCode = 2
+
+  abcProfileCid <- submit operator do
+    exerciseCmd abcReqCid ApproveRegistration
+
+  -- Financier A registers
+  finAReqCid <- submit financierA do
+    createCmd RegistrationRequest with
+      operator
+      applicantParty = financierA
+      companyName = "First Capital Factoring Ltd"
+      businessLocation = "Marina, Lagos Island, Lagos"
+      cacOrRegistrationNumber = "RC-8812904"
+      requestedRole = FinancierRole
+      roleCode = 3
+
+  finAProfileCid <- submit operator do
+    exerciseCmd finAReqCid ApproveRegistration
+
+  -- -------------------------------------------------------------
+  -- 2. Invoice Creation by Supplier (Bello Electronics)
+  -- -------------------------------------------------------------
+  let
+    issueTime = time (date 2026 Oct 1) 9 0 0
+    dueTime = time (date 2026 Nov 30) 17 0 0 -- 60 days maturity
+
+    poDoc = DocumentEvidence with
+      docType = "PurchaseOrder"
+      documentHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      uriOrRef = "s3://9jatrade-docs/po/PO-ABC-2026-99.pdf"
+
+    invDoc = DocumentEvidence with
+      docType = "InvoicePDF"
+      documentHash = "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
+      uriOrRef = "s3://9jatrade-docs/invoices/NT-1024.pdf"
+
+    refrigeratorItem = InvoiceItem with
+      description = "Commercial Double-Door Display Freezer 500L"
+      quantity = 10.0
+      unit = "Units"
+      unitPrice = 1000000.0 -- ₦1,000,000 per unit
+      itemTotal = 10000000.0 -- ₦10,000,000 total
+
+  draftInvoiceCid <- submit bello do
+    createCmd Invoice with
+      invoiceId = "NT-1024"
+      supplier = bello
+      buyer = abcRetail
+      operator
+      amount = 10000000.0 -- ₦10,000,000
+      currency = "NGN"
+      issueDate = issueTime
+      dueDate = dueTime
+      description = "Supply of commercial refrigeration and store equipment"
+      items = [refrigeratorItem]
+      supportingDocuments = [poDoc, invDoc]
+      status = InvoiceDraft
+      correctionNotes = None
+
+  -- Bello submits invoice for buyer review
+  submittedInvoiceCid <- submit bello do
+    exerciseCmd draftInvoiceCid SubmitForReview
+
+  -- -------------------------------------------------------------
+  -- 3. Buyer Confirmation (ABC Retail acknowledges obligation)
+  -- -------------------------------------------------------------
+  (confirmedInvoiceCid, buyerConfCid) <- submit abcRetail do
+    exerciseCmd submittedInvoiceCid ConfirmInvoice with
+      confirmationNotes = "We acknowledge the ₦10,000,000 commercial obligation due in 60 days."
+
+  -- -------------------------------------------------------------
+  -- 4. Fulfillment / Delivery Confirmation (ABC Retail)
+  -- -------------------------------------------------------------
+  let
+    deliveryDoc = DocumentEvidence with
+      docType = "DeliveryNote"
+      documentHash = "3f79bb7b435b05321651daefd374cdc681dc06faa65e374e38337b88ca046dea"
+      uriOrRef = "s3://9jatrade-docs/delivery/DN-1024-signed.pdf"
+
+  (deliveredInvoiceCid, delivConfCid) <- submit abcRetail do
+    exerciseCmd confirmedInvoiceCid ConfirmDelivery with
+      fulfillmentNotes = "All refrigeration units delivered and inspected in working condition."
+      deliveryEvidence = deliveryDoc
+
+  -- -------------------------------------------------------------
+  -- 5. Financing Marketplace: Bello requests up to ₦8.5m financing
+  -- -------------------------------------------------------------
+  financingReqCid <- submit bello do
+    createCmd FinancingRequest with
+      requestId = "REQ-NT-1024"
+      invoiceId = "NT-1024"
+      invoiceCid = deliveredInvoiceCid
+      supplier = bello
+      buyer = abcRetail
+      operator
+      eligibleFinanciers = [financierA, financierB, financierC]
+      invoiceAmount = 10000000.0
+      maxFundingRequested = 8500000.0 -- up to ₦8.5m
+      currency = "NGN"
+      dueDate = dueTime
+
+  -- Financier A submits Offer A: ₦8.5m upfront, ₦600k fee, ₦9.1m repayment
+  let expiryTime = time (date 2026 Oct 10) 23 59 59
+
+  offerACid <- submit financierA do
+    exerciseCmd financingReqCid MakeFinancingOffer with
+      offerId = "OFFER-FIN-A"
+      financier = financierA
+      fundingAmount = 8500000.0
+      financingFee = 600000.0
+      termDays = 60
+      offerExpiry = expiryTime
+      conditions = "Clean Trust Passport and signed assignment acknowledgment"
+
+  -- Financier B submits Offer B: ₦8.0m upfront, ₦450k fee, ₦8.45m repayment
+  offerBCid <- submit financierB do
+    exerciseCmd financingReqCid MakeFinancingOffer with
+      offerId = "OFFER-FIN-B"
+      financier = financierB
+      fundingAmount = 8000000.0
+      financingFee = 450000.0
+      termDays = 60
+      offerExpiry = expiryTime
+      conditions = "Standard invoice assignment terms"
+
+  -- -------------------------------------------------------------
+  -- 6. Offer Acceptance & Duplicate-Financing Guard
+  -- -------------------------------------------------------------
+  -- Bello compares offers and accepts Financier A
+  (agreementCid, financedInvoiceCid) <- submit bello do
+    exerciseCmd offerACid AcceptFinancingOffer with
+      agreementId = "AGREE-NT-1024-FIN-A"
+
+  -- Verify duplicate financing attempt is BLOCKED:
+  -- If Bello tries to accept Offer B on the same invoice, Daml throws an error
+  -- because deliveredInvoiceCid was already consumed and locked!
+  submitMustFail bello do
+    exerciseCmd offerBCid AcceptFinancingOffer with
+      agreementId = "AGREE-DUPLICATE-ATTEMPT"
+
+  -- -------------------------------------------------------------
+  -- 7. Funding Disbursement by Financier A
+  -- -------------------------------------------------------------
+  fundedAgreementCid <- submit financierA do
+    exerciseCmd agreementCid MarkAsFunded
+
+  -- -------------------------------------------------------------
+  -- 8. Settlement at Maturity (ABC Retail pays ₦10,000,000)
+  -- -------------------------------------------------------------
+  (settlementRecordCid, closedAgreementCid) <- submit abcRetail do
+    exerciseCmd fundedAgreementCid SettleFinancing with
+      settlementAmount = 10000000.0
+      paymentReference = "NIBSS-EFT-998877665544"
+
+  -- Verify settlement breakdown:
+  Some settlement <- queryContractId abcRetail settlementRecordCid
+  assert (settlement.financierPayout == 9100000.0)      -- ₦8.5m principal + ₦600k fee
+  assert (settlement.supplierRemainderPayout == 900000.0) -- ₦10m - ₦9.1m = ₦900k
+
+  return ()

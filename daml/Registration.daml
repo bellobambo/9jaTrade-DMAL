@@ -1,0 +1,99 @@
+module Registration where
+
+import Types
+
+-- | Represents an active registered company on 9jaTrade
+-- roleCode marker: 1 = Supplier, 2 = Buyer, 3 = Financier
+template CompanyProfile
+  with
+    operator : Party
+    companyParty : Party
+    companyName : Text
+    businessLocation : Text
+    cacOrRegistrationNumber : Text
+    role : CompanyRole
+    roleCode : Int
+    isVerified : Bool
+  where
+    signatory operator, companyParty
+
+    ensure roleCode == roleToCode role && roleCode >= 1 && roleCode <= 3
+
+    -- | Operator or company can update profile metadata
+    choice UpdateVerificationStatus : ContractId CompanyProfile
+      with
+        newStatus : Bool
+      controller operator
+      do
+        create this with isVerified = newStatus
+
+
+-- | Registration Request: Submitted by a new user to join as Supplier, Buyer, or Financier
+template RegistrationRequest
+  with
+    operator : Party
+    applicantParty : Party
+    companyName : Text
+    businessLocation : Text
+    cacOrRegistrationNumber : Text
+    requestedRole : CompanyRole
+    roleCode : Int
+  where
+    signatory applicantParty
+    observer operator
+
+    ensure roleCode == roleToCode requestedRole && roleCode >= 1 && roleCode <= 3
+
+    -- | Operator approves the company onboarding after KYC/business checks
+    choice ApproveRegistration : ContractId CompanyProfile
+      controller operator
+      do
+        create CompanyProfile with
+          operator
+          companyParty = applicantParty
+          companyName
+          businessLocation
+          cacOrRegistrationNumber
+          role = requestedRole
+          roleCode
+          isVerified = True
+
+    -- | Operator rejects the registration
+    choice RejectRegistration : ()
+      with
+        reason : Text
+      controller operator
+      do
+        return ()
+
+
+-- | Direct Invitation: Operator can pre-authorize and invite an organization
+template RegistrationInvitation
+  with
+    operator : Party
+    inviteeParty : Party
+    companyName : Text
+    businessLocation : Text
+    assignedRole : CompanyRole
+    roleCode : Int
+  where
+    signatory operator
+    observer inviteeParty
+
+    ensure roleCode == roleToCode assignedRole && roleCode >= 1 && roleCode <= 3
+
+    -- | Invitee accepts the invitation to activate their company profile
+    choice AcceptInvitation : ContractId CompanyProfile
+      with
+        cacOrRegistrationNumber : Text
+      controller inviteeParty
+      do
+        create CompanyProfile with
+          operator
+          companyParty = inviteeParty
+          companyName
+          businessLocation
+          cacOrRegistrationNumber
+          role = assignedRole
+          roleCode
+          isVerified = True
