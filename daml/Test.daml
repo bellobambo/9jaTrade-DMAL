@@ -150,7 +150,7 @@ test9jaTradeEndToEnd = script do
   -- Financier A submits Offer A: ₦8.5m upfront, ₦600k fee, ₦9.1m repayment
   let expiryTime = time (date 2026 Oct 10) 23 59 59
 
-  offerACid <- submit financierA do
+  (offerACid, noticeACid) <- submit financierA do
     exerciseCmd financingReqCid MakeFinancingOffer with
       offerId = "OFFER-FIN-A"
       financier = financierA
@@ -161,7 +161,7 @@ test9jaTradeEndToEnd = script do
       conditions = "Clean Trust Passport and signed assignment acknowledgment"
 
   -- Financier B submits Offer B: ₦8.0m upfront, ₦450k fee, ₦8.45m repayment
-  offerBCid <- submit financierB do
+  (offerBCid, noticeBCid) <- submit financierB do
     exerciseCmd financingReqCid MakeFinancingOffer with
       offerId = "OFFER-FIN-B"
       financier = financierB
@@ -170,6 +170,20 @@ test9jaTradeEndToEnd = script do
       termDays = 60
       offerExpiry = expiryTime
       conditions = "Standard invoice assignment terms"
+
+  -- -------------------------------------------------------------
+  -- 5b. Verify Market Depth (Bid Count) & Sub-Transaction Privacy
+  -- -------------------------------------------------------------
+  -- Financier B inspects the market:
+  -- 1. Number of people willing to finance: Financier B sees 2 bids!
+  bidNotices <- query @FinancingBidNotice financierB
+  assertMsg "Financier B should see 2 bids submitted by financiers" (length bidNotices == 2)
+
+  -- 2. Sub-transaction privacy guarantee:
+  -- Financier B CANNOT see Financier A's private rates or fee!
+  -- Financier B ONLY sees their OWN private offer.
+  privateOffersSeenByB <- query @FinancingOffer financierB
+  assertMsg "Financier B should only see their own offer, not competitor offers" (length privateOffersSeenByB == 1)
 
   -- -------------------------------------------------------------
   -- 6. Offer Acceptance & Duplicate-Financing Guard
@@ -204,5 +218,14 @@ test9jaTradeEndToEnd = script do
   Some settlement <- queryContractId abcRetail settlementRecordCid
   assert (settlement.financierPayout == 9100000.0)      -- ₦8.5m principal + ₦600k fee
   assert (settlement.supplierRemainderPayout == 900000.0) -- ₦10m - ₦9.1m = ₦900k
+
+  -- -------------------------------------------------------------
+  -- 9. Close Invoice as Settled
+  -- -------------------------------------------------------------
+  settledInvoiceCid <- submit abcRetail do
+    exerciseCmd financedInvoiceCid CloseInvoiceAsSettled
+
+  Some settledInvoice <- queryContractId abcRetail settledInvoiceCid
+  assert (settledInvoice.status == InvoiceSettled)
 
   return ()

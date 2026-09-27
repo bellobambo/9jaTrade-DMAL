@@ -22,8 +22,11 @@ template FinancingRequest
 
     ensure maxFundingRequested > 0.0 && maxFundingRequested <= invoiceAmount
 
-    -- | Any eligible registered Financier can submit a competitive offer
-    nonconsuming choice MakeFinancingOffer : ContractId FinancingOffer
+    -- | Any eligible registered Financier can submit a competitive offer.
+    -- Creates a PRIVATE FinancingOffer (visible only to supplier & this financier)
+    -- AND a PUBLIC FinancingBidNotice (visible to all eligible financiers so competitors
+    -- know the number/count of financiers bidding, without revealing private rates/fees).
+    nonconsuming choice MakeFinancingOffer : (ContractId FinancingOffer, ContractId FinancingBidNotice)
       with
         offerId : Text
         financier : Party
@@ -34,9 +37,12 @@ template FinancingRequest
         conditions : Text
       controller financier
       do
+        assertMsg "Financier must be in eligibleFinanciers" (financier `elem` eligibleFinanciers)
         assertMsg "Funding amount cannot exceed max requested" (fundingAmount <= maxFundingRequested)
         assertMsg "Funding amount + fee cannot exceed total invoice amount" (fundingAmount + financingFee <= invoiceAmount)
-        create FinancingOffer with
+        now <- getTime
+
+        offerCid <- create FinancingOffer with
           offerId
           requestId
           invoiceId
@@ -49,12 +55,56 @@ template FinancingRequest
           fundingAmount
           financingFee
           totalRepayment = fundingAmount + financingFee
+          currency
           termDays
           offerExpiry
+          invoiceDueDate = dueDate
           conditions
+
+        noticeCid <- create FinancingBidNotice with
+          requestId
+          invoiceId
+          offerId
+          financier
+          supplier
+          eligibleFinanciers
+          operator
+          submittedAt = now
+
+        return (offerCid, noticeCid)
 
     -- | Supplier can cancel request if not yet financed
     choice CancelFinancingRequest : ()
+      controller supplier
+      do
+        return ()
+
+
+-- | 2. Financing Bid Notice: Broadcast to ALL eligible financiers so they know
+-- the total count of competing financiers willing to finance, WITHOUT exposing private
+-- funding amounts, discount rates, or fees.
+template FinancingBidNotice
+  with
+    requestId : Text
+    invoiceId : Text
+    offerId : Text
+    financier : Party
+    supplier : Party
+    eligibleFinanciers : [Party]
+    operator : Party
+    submittedAt : Time
+  where
+    signatory financier
+    observer supplier, operator, eligibleFinanciers
+
+    -- | Financier can withdraw their bid notice
+    choice WithdrawBidNotice : ()
+      controller financier
+      do
+        return ()
+
+    -- | Supplier can close notice once financing is finalized
+    choice CloseBidNotice : ()
       controller supplier
       do
         return ()
@@ -75,8 +125,10 @@ template FinancingOffer
     fundingAmount : Decimal
     financingFee : Decimal
     totalRepayment : Decimal
+    currency : Text
     termDays : Int
     offerExpiry : Time
+    invoiceDueDate : Time
     conditions : Text
   where
     signatory financier
@@ -108,8 +160,8 @@ template FinancingOffer
           financingFee
           totalRepaymentToFinancier = totalRepayment
           supplierBalanceDue = invoiceAmount - totalRepayment
-          currency = "NGN"
-          dueDate = offerExpiry
+          currency
+          dueDate = invoiceDueDate
           isFunded = False
           isSettled = False
 
